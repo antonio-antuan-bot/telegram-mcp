@@ -95,6 +95,16 @@ def _link_urls(msg):
     return out
 
 
+def message_formatting(msg):
+    """Sorted entity kinds of a message ("blockquote", "code", "text_url"...),
+    [] for plain text. Kinds only: offsets would not match sanitized text."""
+    kinds = set()
+    for e in getattr(msg, "entities", None) or []:
+        name = type(e).__name__.removeprefix("MessageEntity") or "unknown"
+        kinds.add(re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower())
+    return sorted(kinds)
+
+
 def _rich_custom_emojis(node):
     """Walk nested PageBlock/RichText objects without fetching their documents."""
     if isinstance(node, types.TextCustomEmoji):
@@ -308,6 +318,9 @@ def message_to_dict(msg, chat_id: Optional[int] = None, forum: bool = False) -> 
     if rich:
         d["rich"] = True  # text rebuilt from page blocks, not a verbatim .message
     d.update(get_custom_emoji_metadata(msg))
+    formatting = message_formatting(msg)
+    if formatting:
+        d["formatting"] = formatting
 
     media_label = get_media_label(msg)
     if media_label:
