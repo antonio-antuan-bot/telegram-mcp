@@ -752,6 +752,52 @@ When `TELEGRAM_ALLOWED_CHAT_IDS` is set:
 
 If `TELEGRAM_ALLOWED_CHAT_IDS` is unset or empty, the server operates in unrestricted mode (default), preserving 100% backward compatibility.
 
+### Granting access at run time (grants file)
+
+Instead of a fixed list, the readable chats can live in a file that changes
+while the server runs. A human approves each new chat through an external
+approver; the agent can ask but never grant.
+
+```bash
+TELEGRAM_GRANTS_FILE=/data/grants/grants.json   # back this up
+TELEGRAM_GRANTS_SEAL_FILE=/data/seal/seal.json  # keep this OUT of backups
+TELEGRAM_ALLOWED_CHAT_IDS=-100123456789         # seeds a new, empty store only
+TELEGRAM_RESTRICTED_CHAT_IDS=-100987654321      # never readable, never granted
+TELEGRAM_GRANT_URL=http://approver:9001/grant
+TELEGRAM_GRANT_ACCOUNT=telegram-main            # the account name on the card
+```
+
+- Ids are marked chat ids only (`list_access_chats` shows them); a bare id or
+  a username never matches a grant by itself, and a lookup by id never falls
+  back to another chat with the same bare id. Bots are never readable.
+- `list_access_chats` lists chats with id, name, type and access, page by
+  page, never message text. Service notifications (777000), Saved Messages,
+  bots and restricted chats are left out and cannot be granted.
+- `request_access` posts `{"messenger": "telegram", "account", "subject",
+  "alias", "warnings": []}` to `TELEGRAM_GRANT_URL` and waits (up to
+  `TELEGRAM_GRANT_TIMEOUT` seconds, default 600). Only a `200` answer with
+  `"allow": true` grants. One request per chat at a time.
+- `revoke_access` needs no approval. It withdraws a pending request for the
+  chat, and every tool call running at that moment ends with an error instead
+  of its result.
+- Every write rotates a token kept in both files, and a grants file found
+  missing, unreadable or malformed gets the seal a new one. A grants file
+  restored from a backup therefore no longer matches the seal: its grants
+  show as `unconfirmed` and stay closed until approved again. A missing,
+  unreadable or malformed store closes every chat; a revoked seed entry stays
+  revoked.
+- Any failed check that finds the grants file changed since it was last
+  trusted, or cannot look at it at all, replaces the seal too. If the seal cannot be replaced (a full or
+  read-only disk), every chat stays closed and the replacement is retried on
+  each check; the seal's directory must stay writable. Known gap: a restart while the seal still cannot be
+  written, followed by restoring the old file, would trust it again.
+- File tools (downloads, uploads) are disabled while their allowed roots
+  overlap the grants or seal directory.
+- `get_history` of a channel post's thread returns only comments whose
+  discussion group is granted too; `get_last_interaction` checks its contact.
+- The file is replaced atomically and re-read on change; one store per
+  server process (run one server per account).
+
 ## Docker
 
 Build the image:

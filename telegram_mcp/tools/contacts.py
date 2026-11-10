@@ -273,6 +273,9 @@ async def get_last_interaction(contact_id: Union[int, str], account: Optional[st
         contact = await resolve_entity(contact_id, cl)
         if not isinstance(contact, User):
             return f"ID {contact_id} is not a user/contact."
+        # contact_id is not a chat parameter, so @validate_id does not check it.
+        if is_chat_allowlist_enabled() and not is_chat_allowed(contact_id, contact):
+            return check_chat_access(contact_id, contact)
 
         contact_name = sanitize_name(
             f"{getattr(contact, 'first_name', '')} {getattr(contact, 'last_name', '')}".strip()

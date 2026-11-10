@@ -69,6 +69,7 @@ from functools import wraps
 import telethon.errors.rpcerrorlist
 from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
 from telegram_mcp.client_identity import client_identity_kwargs
+from telegram_mcp import grants
 
 
 class ValidationError(Exception):
@@ -1155,6 +1156,8 @@ ALLOWED_CHAT_IDS = _load_allowed_chat_ids()
 
 def get_effective_allowed_chat_ids() -> Optional[set[Union[int, str]]]:
     """Return the currently effective set of allowed chat IDs, or None if allowlist is disabled."""
+    if grants.enabled():
+        return grants.readable_ids()
     env_raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
     if env_raw is not None:
         return _parse_allowed_chat_ids(env_raw)
@@ -1171,6 +1174,8 @@ def is_chat_allowed(chat_identifier: Any, entity: Any = None) -> bool:
 
     If allowlist is not enabled, always returns True.
     """
+    if grants.enabled():
+        return grants.allows(chat_identifier, entity)
     allowed = get_effective_allowed_chat_ids()
     if allowed is None:
         return True
@@ -2046,9 +2051,11 @@ async def _resolve(getter: str, identifier: Union[int, str], client, label: str)
         # An id that came from a saved alias is exact; guessing marked variants of
         # it could deliver to a completely unrelated chat.
         from_alias = identifier is not original
-        return await _resolve_with_retries(
-            getter, identifier, client, label, try_marked=not from_alias
+        resolved = await _resolve_with_retries(
+            getter, identifier, client, label, try_marked=not from_alias and not grants.enabled()
         )
+        grants.check_resolved(identifier, resolved)
+        return resolved
     except (ValueError, *_PEER_ERRORS) as error:
         # An unknown or stale nickname is a question for the user, not a dead end:
         # report the wording they used, never the opaque stored id.
@@ -2454,6 +2461,11 @@ async def _ensure_allowed_roots(
                 f"{tool_name} is disabled until allowed roots are configured. "
                 "Provide server CLI roots and/or client MCP Roots."
             ),
+        )
+    if grants.roots_overlap(roots):
+        return (
+            [],
+            f"{tool_name} is disabled because allowed roots overlap the grants store.",
         )
     return roots, None
 

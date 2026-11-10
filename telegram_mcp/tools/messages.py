@@ -2411,6 +2411,15 @@ async def get_history(
             # Filtering the last `limit` group messages client-side missed most of a
             # busy forum and every nested reply (their reply_to_msg_id is not the root).
             messages = await cl.get_messages(entity, limit=limit, reply_to=tid)
+            # On a broadcast channel the thread is a post's comments, which
+            # live in its linked discussion group: a chat of its own.
+            if is_chat_allowlist_enabled():
+                messages = [
+                    m
+                    for m in messages
+                    if getattr(m, "peer_id", None) is None
+                    or is_chat_allowed(utils.get_peer_id(m.peer_id))
+                ]
 
         numeric_chat_id = get_marked_id(entity)
         await transcription.prefetch_transcripts(cl, entity, numeric_chat_id, messages)
