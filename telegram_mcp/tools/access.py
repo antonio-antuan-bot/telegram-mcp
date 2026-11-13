@@ -169,10 +169,10 @@ def _photo_limits() -> Optional[Tuple[int, float]]:
     when either is invalid (no clamping, no fallback to the default)."""
     max_bytes = _photo_max_bytes()
     if max_bytes is None:
-        logger.warning("TELEGRAM_GRANT_PHOTO_MAX_BYTES is invalid; photo left out")
+        logger.error("TELEGRAM_GRANT_PHOTO_MAX_BYTES is invalid; photo left out")
     timeout = _photo_timeout()
     if timeout is None:
-        logger.warning("TELEGRAM_GRANT_PHOTO_TIMEOUT is invalid; photo left out")
+        logger.error("TELEGRAM_GRANT_PHOTO_TIMEOUT is invalid; photo left out")
     if max_bytes is None or timeout is None:
         return None
     return max_bytes, timeout

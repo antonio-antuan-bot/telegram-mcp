@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import stat
 from types import SimpleNamespace
@@ -1318,9 +1319,9 @@ def test_photo_settings_invalid(store, monkeypatch, caplog, name, value):
     assert len(calls) == 1 and "photo" not in calls[0][1]
     assert json.loads(out) == {"result": "granted"}
     assert seen.calls == []
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    message = warnings[0].getMessage()
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and len(caplog.records) == 1
+    message = errors[0].getMessage()
     assert f"TELEGRAM_GRANT_PHOTO_{name}" in message and value.strip() not in message
 
 
@@ -1349,3 +1350,27 @@ def test_photo_flag_off_ignores_invalid_settings(store, monkeypatch, caplog):
         "warnings": [],
     }
     assert seen.calls == [] and caplog.records == []
+
+
+def test_invalid_photo_setting_is_logged_with_the_runtime_logging(store, monkeypatch):
+    """The server logs at ERROR only: the message must get through its real
+    logger and handler levels, with no level lowered for the test."""
+    root = logging.getLogger("telegram_mcp")
+    assert root.level == logging.ERROR == runtime.console_handler.level
+    got = []
+    handler = logging.Handler(level=runtime.console_handler.level)
+    handler.emit = got.append
+    root.addHandler(handler)
+    try:
+        photo_on(monkeypatch, MAX_BYTES="32k")
+        photo_client(monkeypatch)
+        request(monkeypatch)
+    finally:
+        root.removeHandler(handler)
+    assert [(r.name, r.levelno, r.getMessage()) for r in got] == [
+        (
+            "telegram_mcp.access",
+            logging.ERROR,
+            "TELEGRAM_GRANT_PHOTO_MAX_BYTES is invalid; photo left out",
+        )
+    ]
