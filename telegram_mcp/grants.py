@@ -20,7 +20,13 @@ Settings (all marked chat ids, e.g. ``-1001234567890``):
 - ``TELEGRAM_GRANT_ACCOUNT``: the account name shown on the approval card.
 - ``TELEGRAM_GRANT_TIMEOUT``: seconds to wait for the approver (600).
 - ``TELEGRAM_GRANT_PHOTO``: ``1`` adds ``"photo"``, the chat's small profile
-  photo as base64 JPEG of at most 32 KiB, left out when there is none.
+  photo as base64 JPEG, left out when there is none.
+- ``TELEGRAM_GRANT_PHOTO_MAX_BYTES``: the photo's size limit in bytes (32768,
+  at most 1048576).
+- ``TELEGRAM_GRANT_PHOTO_TIMEOUT``: seconds for the photo download (10, at
+  most 60). It runs before the approver is asked, so a `request_access` call
+  can take up to this plus ``TELEGRAM_GRANT_TIMEOUT``. An invalid value of
+  either leaves the photo out.
 
 A missing, unreadable or inconsistent store denies every read.
 """

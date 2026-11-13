@@ -1080,10 +1080,11 @@ JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"  # 2054 bytes: 
 def photo_client(monkeypatch, parts=(JPEG,), error=None, wait=None, none=False):
     """Give the fake client a download_profile_photo that writes ``parts`` to
     the given file; it records each call and how many parts were taken."""
-    seen = SimpleNamespace(calls=[], written=0, refused=None)
+    seen = SimpleNamespace(calls=[], written=0, refused=None, limit=None)
 
     async def download_profile_photo(entity, file=None, download_big=True):
         seen.calls.append((entity, download_big))
+        seen.limit = file.limit
         if wait is not None:
             await asyncio.sleep(wait)
         if error is not None:
@@ -1154,7 +1155,7 @@ def test_photo_is_sent_as_padded_base64_and_never_returned(store, monkeypatch, c
 )
 def test_photo_left_out(store, monkeypatch, case):
     monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
-    monkeypatch.setattr(access, "PHOTO_TIMEOUT", 0.05)
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO_TIMEOUT", "0.05")
     kwargs = {
         "no photo": {"none": True},
         "timeout": {"wait": 1},
@@ -1199,3 +1200,152 @@ def test_ask_approver_adds_photo_only_when_given(store):
     calls = []
     run(ask(approver(calls=calls)))
     assert "photo" not in calls[0][1]
+
+
+# --- the photo's size limit and timeout are settings ------------------------
+
+KIB16 = 16 * 1024
+
+
+def jpeg_parts(n):
+    """n parts of 16 KiB, the first starting with the JPEG marker."""
+    return (b"\xff\xd8\xff" + bytes(KIB16 - 3),) + (bytes(KIB16),) * (n - 1)
+
+
+def photo_on(monkeypatch, **env):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    for name in ("MAX_BYTES", "TIMEOUT"):
+        monkeypatch.delenv(f"TELEGRAM_GRANT_PHOTO_{name}", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(f"TELEGRAM_GRANT_PHOTO_{name}", value)
+
+
+def timeouts(monkeypatch):
+    """The timeouts passed to asyncio.wait_for from now on."""
+    seen = []
+    real = asyncio.wait_for
+
+    async def wait_for(aw, timeout):
+        seen.append(timeout)
+        return await real(aw, timeout)
+
+    monkeypatch.setattr(access.asyncio, "wait_for", wait_for)
+    return seen
+
+
+def test_photo_max_bytes_raised_sends_a_larger_photo(store, monkeypatch):
+    photo_on(monkeypatch, MAX_BYTES="50000")
+    seen = photo_client(monkeypatch, parts=jpeg_parts(3))
+    _, calls = request(monkeypatch)
+    assert len(base64.b64decode(calls[0][1]["photo"])) == 3 * KIB16
+    assert seen.limit == 50000
+
+
+def test_photo_max_bytes_lowered_refuses_the_second_part(store, monkeypatch):
+    photo_on(monkeypatch, MAX_BYTES=str(KIB16))
+    seen = photo_client(monkeypatch, parts=jpeg_parts(2))
+    out, calls = request(monkeypatch)
+    assert seen.written == 1 and seen.refused is not None
+    assert "photo" not in calls[0][1] and json.loads(out) == {"result": "granted"}
+
+
+def test_photo_of_exactly_the_configured_limit_is_sent(store, monkeypatch):
+    photo_on(monkeypatch, MAX_BYTES=str(2 * KIB16))
+    photo_client(monkeypatch, parts=jpeg_parts(2))
+    _, calls = request(monkeypatch)
+    assert len(base64.b64decode(calls[0][1]["photo"])) == 2 * KIB16
+
+
+def test_photo_timeout_setting(store, monkeypatch):
+    photo_on(monkeypatch, TIMEOUT="5")
+    waits = timeouts(monkeypatch)
+    photo_client(monkeypatch)
+    _, calls = request(monkeypatch)
+    assert calls[0][1]["photo"] == base64.b64encode(JPEG).decode()
+    assert 5.0 in waits
+
+
+@pytest.mark.parametrize(
+    "name,value,expected",
+    [
+        ("MAX_BYTES", "1", 1),
+        ("MAX_BYTES", "1048576", 1048576),
+        ("MAX_BYTES", " 20000 ", 20000),
+        ("TIMEOUT", "0.001", 0.001),
+        ("TIMEOUT", "60", 60.0),
+    ],
+)
+def test_photo_settings_valid_edges(store, monkeypatch, caplog, name, value, expected):
+    photo_on(monkeypatch, **{name: value})
+    waits = timeouts(monkeypatch)
+    seen = photo_client(monkeypatch, parts=(JPEG[:1],) if expected == 1 else (JPEG,))
+    caplog.set_level("WARNING", logger="telegram_mcp.access")
+    out, calls = request(monkeypatch)
+    assert len(seen.calls) == 1 and len(calls) == 1
+    if name == "MAX_BYTES":
+        assert seen.limit == expected
+    else:
+        assert expected in waits
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("MAX_BYTES", "0"),
+        ("MAX_BYTES", "-1"),
+        ("MAX_BYTES", "+5"),
+        ("MAX_BYTES", "1_000"),
+        ("MAX_BYTES", "32k"),
+        ("MAX_BYTES", "1e4"),
+        ("MAX_BYTES", "\u0661\u0662"),
+        ("MAX_BYTES", "1048577"),
+        ("MAX_BYTES", "9" * 5000),
+        ("TIMEOUT", "0"),
+        ("TIMEOUT", "-1"),
+        ("TIMEOUT", "nan"),
+        ("TIMEOUT", "inf"),
+        ("TIMEOUT", "-inf"),
+        ("TIMEOUT", "60.001"),
+        ("TIMEOUT", "abc"),
+    ],
+)
+def test_photo_settings_invalid(store, monkeypatch, caplog, name, value):
+    photo_on(monkeypatch, **{name: value})
+    seen = photo_client(monkeypatch)
+    caplog.set_level("DEBUG", logger="telegram_mcp.access")
+    out, calls = request(monkeypatch)
+    assert len(calls) == 1 and "photo" not in calls[0][1]
+    assert json.loads(out) == {"result": "granted"}
+    assert seen.calls == []
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert f"TELEGRAM_GRANT_PHOTO_{name}" in message and value.strip() not in message
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_photo_settings_empty_mean_the_defaults(store, monkeypatch, value):
+    photo_on(monkeypatch, MAX_BYTES=value, TIMEOUT=value)
+    waits = timeouts(monkeypatch)
+    seen = photo_client(monkeypatch)
+    _, calls = request(monkeypatch)
+    assert seen.limit == 32768 and 10.0 in waits
+    assert "photo" in calls[0][1]
+
+
+def test_photo_flag_off_ignores_invalid_settings(store, monkeypatch, caplog):
+    monkeypatch.delenv("TELEGRAM_GRANT_PHOTO", raising=False)
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO_MAX_BYTES", "nope")
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO_TIMEOUT", "nope")
+    seen = photo_client(monkeypatch)
+    caplog.set_level("DEBUG", logger="telegram_mcp.access")
+    _, calls = request(monkeypatch)
+    assert calls[0][1] == {
+        "messenger": "telegram",
+        "account": "telegram-test",
+        "subject": str(PERSON),
+        "alias": "Ann Lee",
+        "warnings": [],
+    }
+    assert seen.calls == [] and caplog.records == []
