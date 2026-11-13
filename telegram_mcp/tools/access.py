@@ -5,7 +5,10 @@ readable, never message text. ``request_access`` asks a human through the
 approver; only an approval grants. ``revoke_access`` needs no approval.
 """
 
+import asyncio
 import json
+import logging
+import os
 from typing import Optional, Union
 
 import httpx
@@ -18,6 +21,10 @@ from telegram_mcp.runtime import ensure_connected, get_client, get_entity_type, 
 
 LIST_MAX_LIMIT = 100
 LIST_MAX_DIALOGS = 2000
+PHOTO_MAX_BYTES = 32 * 1024
+PHOTO_TIMEOUT = 10.0
+
+logger = logging.getLogger("telegram_mcp.access")
 
 grants.install_call_barrier(mcp)
 
@@ -109,6 +116,44 @@ async def list_access_chats(offset: int = 0, limit: int = 50) -> str:
     return _dump({"chats": shown, "next_offset": offset + limit if more else None})
 
 
+class _PhotoTooLarge(Exception):
+    pass
+
+
+class _PhotoSink:
+    """An in-memory file for one small photo: a write that would take it past
+    ``limit`` bytes raises, which ends the download."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.data = bytearray()
+
+    def write(self, chunk) -> int:
+        if len(self.data) + len(chunk) > self.limit:
+            raise _PhotoTooLarge()
+        self.data += chunk
+        return len(chunk)
+
+
+async def _small_photo(cl, entity) -> Optional[bytes]:
+    """The chat's small profile photo as JPEG bytes, or None: no photo, more
+    than PHOTO_MAX_BYTES, not a JPEG, slower than PHOTO_TIMEOUT or any error.
+    It only illustrates the request, so nothing here can fail it."""
+    sink = _PhotoSink(PHOTO_MAX_BYTES)
+    try:
+        got = await asyncio.wait_for(
+            cl.download_profile_photo(entity, file=sink, download_big=False),
+            PHOTO_TIMEOUT,
+        )
+    except Exception:
+        logger.debug("chat photo left out")
+        return None
+    data = bytes(sink.data)
+    if got is None or not data.startswith(b"\xff\xd8\xff"):
+        return None
+    return data
+
+
 async def _post(url: str, body: dict, timeout: float):
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout, connect=10.0), trust_env=False
@@ -172,7 +217,10 @@ async def _request(subject: int, generation: int, cfg) -> dict:
         return {"result": "denied", "code": "not_allowed"}
     if subject in grants.readable_ids():
         return {"result": "granted", "code": "already"}
-    return await grants.ask_approver(_post, subject, _name(entity), generation)
+    photo = None
+    if os.getenv("TELEGRAM_GRANT_PHOTO") == "1":
+        photo = await _small_photo(cl, entity)
+    return await grants.ask_approver(_post, subject, _name(entity), generation, photo)
 
 
 @mcp.tool(

@@ -1,6 +1,7 @@
 """Tests for the grants file (telegram_mcp.grants) and the access tools."""
 
 import asyncio
+import base64
 import json
 import os
 import stat
@@ -1069,3 +1070,132 @@ def test_ensure_allowed_roots_refuses_overlap(store, monkeypatch, tmp_path):
     monkeypatch.delenv("TELEGRAM_GRANTS_FILE")
     found, error = run(runtime._ensure_allowed_roots(None, "download_media"))
     assert found == [tmp_path] and error is None
+
+
+# --- the chat's small photo (TELEGRAM_GRANT_PHOTO) --------------------------
+
+JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8 + b"\xff\xd9"  # 2054 bytes: padded base64
+
+
+def photo_client(monkeypatch, parts=(JPEG,), error=None, wait=None, none=False):
+    """Give the fake client a download_profile_photo that writes ``parts`` to
+    the given file; it records each call and how many parts were taken."""
+    seen = SimpleNamespace(calls=[], written=0, refused=None)
+
+    async def download_profile_photo(entity, file=None, download_big=True):
+        seen.calls.append((entity, download_big))
+        if wait is not None:
+            await asyncio.sleep(wait)
+        if error is not None:
+            raise error
+        if none:
+            return None
+        for part in parts:
+            try:
+                file.write(part)
+            except Exception as e:
+                seen.refused = e
+                raise
+            seen.written += 1
+        return file
+
+    monkeypatch.setattr(
+        access.get_client(), "download_profile_photo", download_profile_photo, raising=False
+    )
+    return seen
+
+
+def request(monkeypatch, chat_id=PERSON):
+    calls = []
+    monkeypatch.setattr(access, "_post", approver(calls=calls))
+    out = run(access.request_access(chat_id))
+    return out, calls
+
+
+def test_photo_flag_off_sends_todays_body(store, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_GRANT_PHOTO", raising=False)
+    seen = photo_client(monkeypatch)
+    out, calls = request(monkeypatch)
+    assert json.loads(out) == {"result": "granted"}
+    assert calls[0][1] == {
+        "messenger": "telegram",
+        "account": "telegram-test",
+        "subject": str(PERSON),
+        "alias": "Ann Lee",
+        "warnings": [],
+    }
+    assert seen.calls == []
+
+
+@pytest.mark.parametrize("value", ["0", "true", ""])
+def test_photo_flag_other_values_are_off(store, monkeypatch, value):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", value)
+    seen = photo_client(monkeypatch)
+    out, calls = request(monkeypatch)
+    assert "photo" not in calls[0][1] and seen.calls == []
+
+
+@pytest.mark.parametrize("chat_id", [PERSON, GROUP])
+def test_photo_is_sent_as_padded_base64_and_never_returned(store, monkeypatch, chat_id):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    seen = photo_client(monkeypatch)
+    out, calls = request(monkeypatch, chat_id)
+    photo = calls[0][1]["photo"]
+    assert photo == base64.b64encode(JPEG).decode()
+    assert photo.endswith("=") and base64.b64decode(photo, validate=True) == JPEG
+    assert seen.calls == [(ENTITIES[chat_id], False)]
+    assert json.loads(out) == {"result": "granted"}
+    assert photo not in out and photo[:16] not in out
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no photo", "timeout", "not a jpeg", "error", "empty"],
+)
+def test_photo_left_out(store, monkeypatch, case):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    monkeypatch.setattr(access, "PHOTO_TIMEOUT", 0.05)
+    kwargs = {
+        "no photo": {"none": True},
+        "timeout": {"wait": 1},
+        "not a jpeg": {"parts": (b"\x89PNG\r\n\x1a\n" + bytes(100),)},
+        "error": {"error": RuntimeError("flood wait")},
+        "empty": {"parts": ()},
+    }[case]
+    seen = photo_client(monkeypatch, **kwargs)
+    out, calls = request(monkeypatch)
+    assert json.loads(out) == {"result": "granted"}
+    assert len(seen.calls) == 1 and "photo" not in calls[0][1]
+
+
+def test_photo_download_stops_at_32_kib(store, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    part = b"\xff\xd8\xff" + bytes(16 * 1024 - 3)
+    seen = photo_client(monkeypatch, parts=(part, bytes(16 * 1024), bytes(16 * 1024)))
+    out, calls = request(monkeypatch)
+    assert seen.written == 2 and seen.refused is not None
+    assert json.loads(out) == {"result": "granted"}
+    assert "photo" not in calls[0][1]
+
+
+def test_photo_of_exactly_32_kib_is_sent(store, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    part = b"\xff\xd8\xff" + bytes(16 * 1024 - 3)
+    photo_client(monkeypatch, parts=(part, bytes(16 * 1024)))
+    _, calls = request(monkeypatch)
+    assert base64.b64decode(calls[0][1]["photo"]) == part + bytes(16 * 1024)
+
+
+@pytest.mark.parametrize("chat_id", [CHANNEL, BOT, 999])
+def test_photo_not_fetched_without_a_request(store, monkeypatch, chat_id):
+    """Already granted, never grantable or unknown: no download."""
+    monkeypatch.setenv("TELEGRAM_GRANT_PHOTO", "1")
+    seen = photo_client(monkeypatch)
+    out, calls = request(monkeypatch, chat_id)
+    assert calls == [] and seen.calls == []
+
+
+def test_ask_approver_adds_photo_only_when_given(store):
+    calls = []
+    run(ask(approver(calls=calls)))
+    assert "photo" not in calls[0][1]

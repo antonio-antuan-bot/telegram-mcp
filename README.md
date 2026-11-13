@@ -777,6 +777,9 @@ TELEGRAM_GRANT_ACCOUNT=telegram-main            # the account name on the card
   "alias", "warnings": []}` to `TELEGRAM_GRANT_URL` and waits (up to
   `TELEGRAM_GRANT_TIMEOUT` seconds, default 600). Only a `200` answer with
   `"allow": true` grants. One request per chat at a time.
+- `TELEGRAM_GRANT_PHOTO=1` adds `photo`: the chat's small profile photo, a
+  base64 JPEG of at most 32 KiB, left out when the chat has none. An approver
+  that rejects unknown fields must accept it first.
 - `revoke_access` needs no approval. It withdraws a pending request for the
   chat, and every tool call running at that moment ends with an error instead
   of its result.
