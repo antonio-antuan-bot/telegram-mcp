@@ -19,11 +19,20 @@ Settings (all marked chat ids, e.g. ``-1001234567890``):
   grants only on a 200 answer with ``"allow": true``.
 - ``TELEGRAM_GRANT_ACCOUNT``: the account name shown on the approval card.
 - ``TELEGRAM_GRANT_TIMEOUT``: seconds to wait for the approver (600).
+- ``TELEGRAM_GRANT_PHOTO``: ``1`` adds ``"photo"``, the chat's small profile
+  photo as base64 JPEG, left out when there is none.
+- ``TELEGRAM_GRANT_PHOTO_MAX_BYTES``: the photo's size limit in bytes (32768,
+  at most 1048576).
+- ``TELEGRAM_GRANT_PHOTO_TIMEOUT``: seconds for the photo download (10, at
+  most 60). It runs before the approver is asked, so a `request_access` call
+  can take up to this plus ``TELEGRAM_GRANT_TIMEOUT``. An invalid value of
+  either leaves the photo out.
 
 A missing, unreadable or inconsistent store denies every read.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -528,9 +537,12 @@ def release(chat_id: int) -> None:
     _withdrawn.discard(chat_id)
 
 
-async def ask_approver(post, chat_id: int, alias: str, generation: int) -> Dict[str, Any]:
+async def ask_approver(
+    post, chat_id: int, alias: str, generation: int, photo: Optional[bytes] = None
+) -> Dict[str, Any]:
     """Run one approval for a reserved ``chat_id`` through
     ``post(url, body, timeout)``, which returns (status, decoded JSON or None).
+    ``photo``, when given, is sent as ``"photo"`` in standard base64.
 
     ``generation`` is what ``reserve`` returned; a revoke since then denies,
     and a revoke while the card is open withdraws it.
@@ -552,6 +564,8 @@ async def ask_approver(post, chat_id: int, alias: str, generation: int) -> Dict[
         "alias": alias,
         "warnings": [],
     }
+    if photo is not None:
+        body["photo"] = base64.b64encode(photo).decode("ascii")
     task = asyncio.ensure_future(post(url, body, timeout))
     _pending[chat_id] = task
     try:
